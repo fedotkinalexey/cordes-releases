@@ -1,22 +1,35 @@
 # Builds the Cordes desktop app for a version tag and publishes it here (D183).
 # The source is private: it is read with a read-only deploy key
-# (SOURCE_DEPLOY_KEY). The update bundle is signed with the updater key
+# (SOURCE_DEPLOY_KEY). The update bundles are signed with the updater key
 # (TAURI_SIGNING_PRIVATE_KEY, _PASSWORD); the app checks that signature
-# before installing anything. The app itself is code-signed with a stable,
+# before installing anything. The Mac app is code-signed with a stable,
 # self-signed identity (CODESIGN_P12, _PASSWORD), so an updated copy is the
-# same app to macOS and keeps its keychain access. Kept in the source repository as
+# same app to macOS and keeps its keychain access. The Windows installer is not
+# code-signed yet (D190). Kept in the source repository as
 # desktop/releases-repo/ and copied here by desktop/release.sh.
+#
+# A tag builds both systems and publishes one release only when both
+# succeed. "Run workflow" builds any source ref and keeps the files as the
+# run's artifacts, publishing nothing.
 name: Build and publish Cordes
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Source branch, tag or commit to build (nothing is published)
+        default: main
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: release-${{ github.ref_name }}-${{ inputs.ref }}
+
+env:
+  SOURCE_REF: ${{ inputs.ref || github.ref_name }}
 
 jobs:
   macos:
@@ -24,11 +37,11 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 120
     steps:
-      - name: Source at ${{ github.ref_name }}
+      - name: Source at ${{ env.SOURCE_REF }}
         uses: actions/checkout@v4
         with:
           repository: fedotkinalexey/Cordes-AI
-          ref: ${{ github.ref_name }}
+          ref: ${{ env.SOURCE_REF }}
           ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
           path: src
 
@@ -89,10 +102,107 @@ jobs:
           codesign -dr - "$APP"
           codesign -dr - "$APP/Contents/Resources/cordes-server/cordes-server"
 
+      - name: The built server starts and answers
+        run: python3 src/desktop/smoke.py src/desktop/src-tauri/target/release/bundle/macos/Cordes.app/Contents/Resources/cordes-server/cordes-server
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          if-no-files-found: error
+          path: |
+            src/desktop/src-tauri/target/release/bundle/macos/*.app.tar.gz
+            src/desktop/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+            src/desktop/src-tauri/target/release/bundle/dmg/*.dmg
+
+  windows:
+    name: Windows (x64)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Source at ${{ env.SOURCE_REF }}
+        uses: actions/checkout@v4
+        with:
+          repository: fedotkinalexey/Cordes-AI
+          ref: ${{ env.SOURCE_REF }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          path: src
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: src/backend/requirements.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/desktop/src-tauri
+
+      - name: Backend environment
+        run: |
+          python -m venv src/backend/.venv
+          src/backend/.venv/Scripts/python.exe -m pip install --upgrade pip
+          src/backend/.venv/Scripts/python.exe -m pip install -r src/backend/requirements.txt pyinstaller==6.22.3
+
+      - name: Tests that matter on Windows (folders, commands, keychain, backups)
+        working-directory: src/backend
+        run: >
+          .venv/Scripts/python.exe -m pytest -q
+          tests/test_windows.py tests/test_computer.py tests/test_computer_policy.py tests/test_computer_undo.py
+          tests/test_backup.py tests/test_desktop_settings.py tests/test_remembered.py
+
+      - name: Web app dependencies
+        run: npm ci --prefix src/frontend --no-audit --no-fund
+
+      - name: Build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: sh src/desktop/build.sh
+
+      - name: The built server starts and answers
+        run: python src/desktop/smoke.py src/desktop/build/cordes-server/cordes-server.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          if-no-files-found: error
+          path: |
+            src/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+            src/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe.sig
+
+  publish:
+    name: Publish the release
+    if: github.event_name == 'push'
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Release scripts and notes at ${{ env.SOURCE_REF }}
+        uses: actions/checkout@v4
+        with:
+          repository: fedotkinalexey/Cordes-AI
+          ref: ${{ env.SOURCE_REF }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          path: src
+          sparse-checkout: desktop
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: built
+
       - name: Release files
         run: |
           python3 src/desktop/release_files.py \
-            --bundle src/desktop/src-tauri/target/release/bundle \
+            --bundle built/macos \
+            --windows-bundle built/windows \
             --tag "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
             --changelog src/desktop/CHANGELOG.md \
@@ -102,7 +212,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" out/*.dmg out/*.app.tar.gz out/*.app.tar.gz.sig out/latest.json \
+          gh release create "${GITHUB_REF_NAME}" out/*.dmg out/*.app.tar.gz out/*.app.tar.gz.sig out/*-setup.exe out/*-setup.exe.sig out/latest.json \
             --repo "${GITHUB_REPOSITORY}" \
             --title "Cordes ${GITHUB_REF_NAME#v}" \
             --notes-file out/notes.md
