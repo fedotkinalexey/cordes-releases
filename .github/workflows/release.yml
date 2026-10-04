@@ -2,7 +2,9 @@
 # The source is private: it is read with a read-only deploy key
 # (SOURCE_DEPLOY_KEY). The update bundle is signed with the updater key
 # (TAURI_SIGNING_PRIVATE_KEY, _PASSWORD); the app checks that signature
-# before installing anything. Kept in the source repository as
+# before installing anything. The app itself is code-signed with a stable,
+# self-signed identity (CODESIGN_P12, _PASSWORD), so an updated copy is the
+# same app to macOS and keeps its keychain access. Kept in the source repository as
 # desktop/releases-repo/ and copied here by desktop/release.sh.
 name: Build and publish Cordes
 
@@ -55,11 +57,37 @@ jobs:
       - name: Web app dependencies
         run: npm ci --prefix src/frontend --no-audit --no-fund
 
+      - name: Code-signing identity
+        env:
+          CODESIGN_P12: ${{ secrets.CODESIGN_P12 }}
+          CODESIGN_P12_PASSWORD: ${{ secrets.CODESIGN_P12_PASSWORD }}
+        run: |
+          echo "$CODESIGN_P12" | base64 --decode > "$RUNNER_TEMP/codesign.p12"
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          security create-keychain -p build "$KEYCHAIN"
+          security set-keychain-settings -lut 7200 "$KEYCHAIN"
+          security unlock-keychain -p build "$KEYCHAIN"
+          security import "$RUNNER_TEMP/codesign.p12" -k "$KEYCHAIN" -P "$CODESIGN_P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k build "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          openssl pkcs12 -in "$RUNNER_TEMP/codesign.p12" -clcerts -nokeys -passin env:CODESIGN_P12_PASSWORD -out "$RUNNER_TEMP/codesign.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/codesign.pem"
+          rm -f "$RUNNER_TEMP/codesign.p12"
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
       - name: Build
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: Cordes Desktop
         run: sh src/desktop/build.sh
+
+      - name: Signature check
+        run: |
+          APP=src/desktop/src-tauri/target/release/bundle/macos/Cordes.app
+          codesign --verify --deep --strict "$APP"
+          codesign -dr - "$APP"
+          codesign -dr - "$APP/Contents/Resources/cordes-server/cordes-server"
 
       - name: Release files
         run: |
