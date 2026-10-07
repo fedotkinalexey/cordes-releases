@@ -1,11 +1,13 @@
-# Cordes for Mac and Windows
+# Cordes for Mac
 
 Builds of the Cordes desktop app. Download from the latest release:
 
 **https://github.com/fedotkinalexey/cordes-releases/releases/latest**
 
 - **Mac** (Apple Silicon): `Cordes_<version>_aarch64.dmg`
-- **Windows** (64-bit, Windows 10 or 11): `Cordes_<version>_x64-setup.exe`
+
+Windows builds are paused: releases from 0.6.4 on are Mac only. 0.6.3 is the
+last one with a Windows installer, and a copy installed from it stays on 0.6.3.
 
 Once installed, Cordes finds new versions here by itself and offers
 **Restart to update**. Nothing is installed until you press it.

@@ -8,9 +8,10 @@
 # code-signed yet (D190). Kept in the source repository as
 # desktop/releases-repo/ and copied here by desktop/release.sh.
 #
-# A tag builds both systems and publishes one release only when both
-# succeed. "Run workflow" builds any source ref and keeps the files as the
-# run's artifacts, publishing nothing.
+# A tag builds the Mac app and publishes it. Windows is not built for a tag
+# (the owner's call, 2026-10-07); "Run workflow" with "windows" ticked builds
+# it from any source ref. "Run workflow" keeps the files as the run's
+# artifacts and publishes nothing.
 name: Build and publish Cordes
 
 on:
@@ -21,6 +22,10 @@ on:
       ref:
         description: Source branch, tag or commit to build (nothing is published)
         default: main
+      windows:
+        description: Build the Windows installer too
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -116,6 +121,7 @@ jobs:
 
   windows:
     name: Windows (x64)
+    if: ${{ inputs.windows == true }}
     runs-on: windows-latest
     timeout-minutes: 120
     defaults:
@@ -182,7 +188,7 @@ jobs:
   publish:
     name: Publish the release
     if: github.event_name == 'push'
-    needs: [macos, windows]
+    needs: [macos]
     runs-on: ubuntu-latest
     steps:
       - name: Release scripts and notes at ${{ env.SOURCE_REF }}
@@ -202,7 +208,6 @@ jobs:
         run: |
           python3 src/desktop/release_files.py \
             --bundle built/macos \
-            --windows-bundle built/windows \
             --tag "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
             --changelog src/desktop/CHANGELOG.md \
@@ -212,7 +217,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" out/*.dmg out/*.app.tar.gz out/*.app.tar.gz.sig out/*-setup.exe out/*-setup.exe.sig out/latest.json \
+          gh release create "${GITHUB_REF_NAME}" out/*.dmg out/*.app.tar.gz out/*.app.tar.gz.sig out/latest.json \
             --repo "${GITHUB_REPOSITORY}" \
             --title "Cordes ${GITHUB_REF_NAME#v}" \
             --notes-file out/notes.md
