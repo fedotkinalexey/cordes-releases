@@ -20,8 +20,12 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: Source branch, tag or commit to build (nothing is published)
+        description: Source branch, tag or commit to build
         default: main
+      publish_tag:
+        description: Publish an existing source version tag (vX.Y.Z) after a failed build
+        type: boolean
+        default: false
       windows:
         description: Build the Windows installer too
         type: boolean
@@ -41,7 +45,7 @@ env:
 jobs:
   macos:
     name: macOS (Apple Silicon)
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 120
     steps:
       - name: Source at ${{ env.SOURCE_REF }}
@@ -189,7 +193,7 @@ jobs:
 
   publish:
     name: Publish the release
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || (inputs.publish_tag && github.ref == 'refs/heads/main' && startsWith(inputs.ref, 'v'))
     needs: [macos]
     runs-on: ubuntu-latest
     permissions:
@@ -213,7 +217,7 @@ jobs:
         run: |
           python3 src/desktop/release_files.py \
             --bundle built/macos \
-            --tag "${GITHUB_REF_NAME}" \
+            --tag "${SOURCE_REF}" \
             --repo "${GITHUB_REPOSITORY}" \
             --changelog src/desktop/CHANGELOG.md \
             --out out
@@ -222,7 +226,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" out/*.dmg out/*.app.tar.gz out/*.app.tar.gz.sig out/latest.json \
+          gh release create "${SOURCE_REF}" --verify-tag out/*.dmg out/*.app.tar.gz out/*.app.tar.gz.sig out/latest.json \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "Cordes ${GITHUB_REF_NAME#v}" \
+            --title "Cordes ${SOURCE_REF#v}" \
             --notes-file out/notes.md
